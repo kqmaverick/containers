@@ -1,0 +1,189 @@
+# Add this file to kqmaverick/containers as:
+# .github/workflows/nextcloud-fpm-build.yml
+# Merge it into master, then run it from Actions with version 32.0.15 first.
+# This builds an image only. It does not update the catalog or contact TrueNAS.
+# Set the resulting GHCR package to Public before pulling it on TrueNAS.
+
+name: Build Nextcloud FPM
+
+on:
+  workflow_dispatch:
+    inputs:
+      nextcloud_version:
+        description: Nextcloud server version to build
+        type: choice
+        required: true
+        default: '32.0.15'
+        options:
+          - '32.0.15'
+          - '33.0.9'
+          - '34.0.4'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nextcloud-fpm-${{ inputs.nextcloud_version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out pinned ContainerForge source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: trueforge-org/containerforge
+          ref: 91adeaab0fa0b607112c315a15d860afdb2450f1
+          path: upstream
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Resolve image names and pin the upstream base
+        id: prepare
+        env:
+          NC_REQUESTED_VERSION: ${{ inputs.nextcloud_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$NC_REQUESTED_VERSION" in
+            32.0.15|33.0.9|34.0.4) ;;
+            *) echo 'Unsupported Nextcloud version' >&2; exit 1 ;;
+          esac
+          nc_owner="${GITHUB_REPOSITORY_OWNER,,}"
+          nc_image="ghcr.io/${nc_owner}/nextcloud-fpm"
+          nc_base="public.ecr.aws/docker/library/nextcloud:${NC_REQUESTED_VERSION}-fpm"
+          nc_inspect="$(docker buildx imagetools inspect "$nc_base")"
+          nc_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<< "$nc_inspect")"
+          [[ "$nc_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo 'Could not resolve the upstream base digest' >&2
+            exit 1
+          }
+          {
+            echo "image=$nc_image"
+            echo "version=$NC_REQUESTED_VERSION"
+            echo "test_image=${nc_image}:check-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "base_version=${NC_REQUESTED_VERSION}-fpm@${nc_digest}"
+            echo "base_image=${nc_base}@${nc_digest}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the image for validation
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: upstream/apps/nextcloud-fpm
+          file: upstream/apps/nextcloud-fpm/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          provenance: false
+          tags: ${{ steps.prepare.outputs.test_image }}
+          build-args: |
+            VERSION=${{ steps.prepare.outputs.base_version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.prepare.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+            org.opencontainers.image.description=Nextcloud FPM with ContainerForge configuration scripts
+            io.kqmaverick.containerforge.revision=91adeaab0fa0b607112c315a15d860afdb2450f1
+          cache-from: type=gha,scope=nextcloud-fpm-${{ inputs.nextcloud_version }}
+          cache-to: type=gha,mode=max,scope=nextcloud-fpm-${{ inputs.nextcloud_version }}
+
+      - name: Check the actual server version and PHP extensions
+        env:
+          NC_TEST_IMAGE: ${{ steps.prepare.outputs.test_image }}
+          NC_VERSION: ${{ steps.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none \
+            --env "EXPECTED_NEXTCLOUD_VERSION=$NC_VERSION" \
+            --entrypoint php "$NC_TEST_IMAGE" -r '
+              require "/usr/src/nextcloud/version.php";
+              $expected = getenv("EXPECTED_NEXTCLOUD_VERSION");
+              if ($OC_VersionString !== $expected) {
+                fwrite(STDERR, "Expected Nextcloud $expected; found $OC_VersionString\n");
+                exit(1);
+              }
+              foreach (["bz2", "soap", "imap", "smbclient", "redis", "imagick", "pdo_pgsql"] as $extension) {
+                if (!extension_loaded($extension)) {
+                  fwrite(STDERR, "Missing PHP extension: $extension\n");
+                  exit(1);
+                }
+              }
+              echo "Nextcloud $OC_VersionString / PHP ", PHP_VERSION, "\n";
+            '
+
+      - name: Check PHP-FPM and the chart's helper scripts
+        env:
+          NC_TEST_IMAGE: ${{ steps.prepare.outputs.test_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --entrypoint php-fpm "$NC_TEST_IMAGE" -t
+          docker run --rm --network none --entrypoint /bin/sh "$NC_TEST_IMAGE" -ec '
+            test -x /usr/bin/occ
+            test -x /healthcheck.sh
+            test -x /entrypoint.sh
+            test -d /configure-scripts
+            grep -q "Executing injected scripts" /entrypoint.sh
+            /bin/sh -n /entrypoint.sh
+            /bin/bash -n /usr/bin/occ
+            /bin/sh -n /healthcheck.sh
+            for script in /configure-scripts/*.sh; do
+              /bin/sh -n "$script"
+            done
+          '
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the validated image and show its digest
+        env:
+          NC_TEST_IMAGE: ${{ steps.prepare.outputs.test_image }}
+          NC_IMAGE: ${{ steps.prepare.outputs.image }}
+          NC_VERSION: ${{ steps.prepare.outputs.version }}
+          NC_BASE_IMAGE: ${{ steps.prepare.outputs.base_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          nc_tag="${NC_IMAGE}:${NC_VERSION}"
+          docker tag "$NC_TEST_IMAGE" "$nc_tag"
+          docker push "$nc_tag"
+          nc_inspect="$(docker buildx imagetools inspect "$nc_tag")"
+          nc_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<< "$nc_inspect")"
+          [[ "$nc_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo 'Could not resolve the published image digest' >&2
+            exit 1
+          }
+          nc_pinned="${nc_tag}@${nc_digest}"
+          printf 'Published image: %s\n' "$nc_pinned"
+          {
+            echo '## Published Nextcloud FPM image'
+            echo
+            printf '`%s`\n' "$nc_pinned"
+            echo
+            echo '### Catalog image block'
+            echo '```yaml'
+            echo 'image:'
+            printf '  repository: %s\n' "$NC_IMAGE"
+            echo '  pullPolicy: IfNotPresent'
+            printf '  tag: %s@%s\n' "$NC_VERSION" "$nc_digest"
+            echo '```'
+            echo
+            printf 'Upstream base: `%s`\n' "$NC_BASE_IMAGE"
+            echo
+            echo 'Checks passed: server version, required PHP extensions, PHP-FPM configuration, and helper script syntax.'
+            echo
+            echo 'For the first publication, set the GHCR package visibility to Public so TrueNAS can pull it without registry credentials.'
+            echo 'Create a fresh backup before applying this image through the catalog update.'
+          } >> "$GITHUB_STEP_SUMMARY"
