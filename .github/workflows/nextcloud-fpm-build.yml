@@ -1,7 +1,9 @@
 # Add this file to kqmaverick/containers as:
 # .github/workflows/nextcloud-fpm-build.yml
-# Merge it into master, then run it from Actions with version 32.0.15 first.
-# This builds an image only. It does not update the catalog or contact TrueNAS.
+# Also add .github/scripts/prepare-nextcloud-catalog.py from this package.
+# Merge into master, then run Actions with version 35.0.2.
+# Builds and validates an image; 35.0.2 also produces catalog-update files.
+# Does not push to the catalog repository or contact TrueNAS.
 # Set the resulting GHCR package to Public before pulling it on TrueNAS.
 
 name: Build Nextcloud FPM
@@ -13,11 +15,12 @@ on:
         description: Nextcloud server version to build
         type: choice
         required: true
-        default: '32.0.15'
+        default: '35.0.2'
         options:
           - '32.0.15'
           - '33.0.9'
           - '34.0.4'
+          - '35.0.2'
 
 permissions:
   contents: read
@@ -34,6 +37,30 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Check out the catalog-file generator
+        if: inputs.nextcloud_version == '35.0.2'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: workflow-source
+          sparse-checkout: .github/scripts/prepare-nextcloud-catalog.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Check out the current catalog baseline
+        if: inputs.nextcloud_version == '35.0.2'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: kqmaverick/catalog
+          ref: main
+          path: catalog-source
+          sparse-checkout: |
+            /catalog.json
+            /premium/nextcloud/31.0.23/
+            /premium/nextcloud/31.0.24/
+            /premium/nextcloud/app_versions.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Check out pinned ContainerForge source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -53,13 +80,17 @@ jobs:
         run: |
           set -euo pipefail
           case "$NC_REQUESTED_VERSION" in
-            32.0.15|33.0.9|34.0.4) ;;
+            32.0.15|33.0.9|34.0.4|35.0.2) ;;
             *) echo 'Unsupported Nextcloud version' >&2; exit 1 ;;
           esac
           nc_owner="${GITHUB_REPOSITORY_OWNER,,}"
           nc_image="ghcr.io/${nc_owner}/nextcloud-fpm"
           nc_base="public.ecr.aws/docker/library/nextcloud:${NC_REQUESTED_VERSION}-fpm"
-          nc_inspect="$(docker buildx imagetools inspect "$nc_base")"
+          if ! nc_inspect="$(docker buildx imagetools inspect "$nc_base" 2>&1)"; then
+            printf '%s\n' "$nc_inspect" >&2
+            echo "::error::Could not resolve ${nc_base}. The exact FPM image may not be published or mirrored yet. Re-run when it is available; this build requires the requested version."
+            exit 1
+          fi
           nc_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<< "$nc_inspect")"
           [[ "$nc_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
             echo 'Could not resolve the upstream base digest' >&2
@@ -148,6 +179,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish the validated image and show its digest
+        id: publish
         env:
           NC_TEST_IMAGE: ${{ steps.prepare.outputs.test_image }}
           NC_IMAGE: ${{ steps.prepare.outputs.image }}
@@ -166,6 +198,7 @@ jobs:
             exit 1
           }
           nc_pinned="${nc_tag}@${nc_digest}"
+          echo "pinned_image=$nc_pinned" >> "$GITHUB_OUTPUT"
           printf 'Published image: %s\n' "$nc_pinned"
           {
             echo '## Published Nextcloud FPM image'
@@ -187,3 +220,37 @@ jobs:
             echo 'For the first publication, set the GHCR package visibility to Public so TrueNAS can pull it without registry credentials.'
             echo 'Create a fresh backup before applying this image through the catalog update.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate the complete 35.0.2 catalog update
+        if: inputs.nextcloud_version == '35.0.2'
+        env:
+          NC_PUBLISHED_IMAGE: ${{ steps.publish.outputs.pinned_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          nc_catalog_commit="$(git -C catalog-source rev-parse HEAD)"
+          python3 workflow-source/.github/scripts/prepare-nextcloud-catalog.py \
+            --catalog-root catalog-source \
+            --output-dir catalog-update \
+            --image "$NC_PUBLISHED_IMAGE" \
+            --source-commit "$nc_catalog_commit"
+          {
+            echo
+            echo '## Ready-to-apply catalog update'
+            echo
+            echo 'Download the artifact named nextcloud-35.0.2-catalog-31.0.24 from this run.'
+            echo 'It contains the complete new chart, catalog.json, app_versions.json, and a PowerShell application helper.'
+            echo 'The helper checks source and payload hashes before copying files to your local catalog repo.'
+            printf 'Catalog baseline: `%s`\n' "$nc_catalog_commit"
+            echo 'Review and merge your catalog PR, take a fresh verified backup, then update through TrueNAS.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the generated catalog files
+        if: inputs.nextcloud_version == '35.0.2'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nextcloud-35.0.2-catalog-31.0.24
+          path: catalog-update/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
