@@ -16,9 +16,9 @@ import shutil
 import sys
 
 
-SOURCE_VERSION = "31.0.23"
-TARGET_VERSION = "31.0.24"
-SOURCE_SERVER = "34.0.4"
+SOURCE_VERSION = "31.0.25"
+TARGET_VERSION = "31.0.26"
+SOURCE_SERVER = "35.0.2"
 TARGET_SERVER = "35.0.2"
 IMAGE_REPOSITORY = "ghcr.io/kqmaverick/nextcloud-fpm"
 
@@ -131,13 +131,13 @@ def prepare(source, output, image, source_commit):
         raise ValueError("Source chart metadata has an unexpected Nextcloud version")
 
     chart_text = (source_chart / "Chart.yaml").read_text(encoding="utf-8")
-    chart_text = replace_once(chart_text, r"^appVersion: 34\.0\.4$", "appVersion: 35.0.2", "appVersion")
-    chart_text = replace_once(chart_text, r"^version: 31\.0\.23$", "version: 31.0.24", "chart version")
+    chart_text = replace_once(chart_text, r"^appVersion: 35\.0\.2$", "appVersion: 35.0.2", "appVersion")
+    chart_text = replace_once(chart_text, r"^version: 31\.0\.25$", "version: 31.0.26", "chart version")
     values_text = (source_chart / "ix_values.yaml").read_text(encoding="utf-8")
     image_tag = image.split(IMAGE_REPOSITORY + ":", 1)[1]
     values_text = replace_once(
         values_text,
-        r"\Aimage:\n  repository: ghcr\.io/kqmaverick/nextcloud-fpm\n  pullPolicy: IfNotPresent\n  tag: 34\.0\.4@sha256:[a-f0-9]{64}",
+        r"\Aimage:\n  repository: ghcr\.io/kqmaverick/nextcloud-fpm\n  pullPolicy: IfNotPresent\n  tag: 35\.0\.2@sha256:[a-f0-9]{64}",
         f"image:\n  repository: {IMAGE_REPOSITORY}\n  pullPolicy: IfNotPresent\n  tag: {image_tag}",
         "Nextcloud image block",
     )
