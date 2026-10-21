@@ -1,10 +1,7 @@
-# Add this file to kqmaverick/containers as:
-# .github/workflows/nextcloud-fpm-build.yml
-# Also add .github/scripts/prepare-nextcloud-catalog.py from this package.
-# Merge into master, then run Actions with version 35.0.2.
-# Builds and validates an image; 35.0.2 also produces catalog-update files.
+# Builds the ContainerForge-compatible image from an official linux/amd64 base.
+# Rejects PHP runtimes missing the October 21, 2026 security fixes before publish.
+# Nextcloud 35.0.2 also generates catalog 31.0.26 from the current 31.0.25 chart.
 # Does not push to the catalog repository or contact TrueNAS.
-# Set the resulting GHCR package to Public before pulling it on TrueNAS.
 
 name: Build Nextcloud FPM
 
@@ -55,8 +52,8 @@ jobs:
           path: catalog-source
           sparse-checkout: |
             /catalog.json
-            /premium/nextcloud/31.0.23/
-            /premium/nextcloud/31.0.24/
+            /premium/nextcloud/31.0.25/
+            /premium/nextcloud/31.0.26/
             /premium/nextcloud/app_versions.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -72,7 +69,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Resolve image names and pin the upstream base
+      - name: Resolve image names and pin the official amd64 base
         id: prepare
         env:
           NC_REQUESTED_VERSION: ${{ inputs.nextcloud_version }}
@@ -85,24 +82,46 @@ jobs:
           esac
           nc_owner="${GITHUB_REPOSITORY_OWNER,,}"
           nc_image="ghcr.io/${nc_owner}/nextcloud-fpm"
-          nc_base="public.ecr.aws/docker/library/nextcloud:${NC_REQUESTED_VERSION}-fpm"
-          if ! nc_inspect="$(docker buildx imagetools inspect "$nc_base" 2>&1)"; then
-            printf '%s\n' "$nc_inspect" >&2
-            echo "::error::Could not resolve ${nc_base}. The exact FPM image may not be published or mirrored yet. Re-run when it is available; this build requires the requested version."
+          nc_base="docker.io/library/nextcloud:${NC_REQUESTED_VERSION}-fpm"
+          if ! nc_index="$(docker buildx imagetools inspect --raw "$nc_base")"; then
+            echo "::error::Could not resolve ${nc_base}. The exact official FPM image must be available before this build can continue."
             exit 1
           fi
-          nc_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<< "$nc_inspect")"
+          nc_digest="$(python3 -c '
+          import json, sys
+          index = json.load(sys.stdin)
+          matches = [item["digest"] for item in index.get("manifests", [])
+                     if item.get("platform", {}).get("os") == "linux"
+                     and item.get("platform", {}).get("architecture") == "amd64"]
+          if len(matches) != 1:
+              sys.exit("Expected exactly one official linux/amd64 image")
+          print(matches[0])
+          ' <<< "$nc_index")"
           [[ "$nc_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
-            echo 'Could not resolve the upstream base digest' >&2
+            echo 'Could not resolve the official amd64 base digest' >&2
             exit 1
           }
           {
             echo "image=$nc_image"
             echo "version=$NC_REQUESTED_VERSION"
             echo "test_image=${nc_image}:check-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            echo "base_version=${NC_REQUESTED_VERSION}-fpm@${nc_digest}"
             echo "base_image=${nc_base}@${nc_digest}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Use the resolved official base in the pinned Dockerfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("upstream/apps/nextcloud-fpm/Dockerfile")
+          text = path.read_text(encoding="utf-8")
+          original = "ARG VERSION\nFROM public.ecr.aws/docker/library/nextcloud:${VERSION}\n"
+          replacement = "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"
+          if text.count(original) != 1:
+              raise SystemExit("Unexpected upstream Dockerfile; review the base-image replacement")
+          path.write_text(text.replace(original, replacement, 1), encoding="utf-8")
+          PY
 
       - name: Build the image for validation
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -112,10 +131,11 @@ jobs:
           platforms: linux/amd64
           load: true
           push: false
+          pull: true
           provenance: false
           tags: ${{ steps.prepare.outputs.test_image }}
           build-args: |
-            VERSION=${{ steps.prepare.outputs.base_version }}
+            BASE_IMAGE=${{ steps.prepare.outputs.base_image }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.prepare.outputs.version }}
@@ -124,6 +144,38 @@ jobs:
             io.kqmaverick.containerforge.revision=91adeaab0fa0b607112c315a15d860afdb2450f1
           cache-from: type=gha,scope=nextcloud-fpm-${{ inputs.nextcloud_version }}
           cache-to: type=gha,mode=max,scope=nextcloud-fpm-${{ inputs.nextcloud_version }}
+
+      - name: Check architecture and patched PHP runtime
+        id: runtime
+        env:
+          NC_TEST_IMAGE: ${{ steps.prepare.outputs.test_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          nc_arch="$(docker image inspect --format '{{.Architecture}}' "$NC_TEST_IMAGE")"
+          [[ "$nc_arch" == 'amd64' ]] || {
+            echo "::error::Expected amd64; found ${nc_arch}" >&2
+            exit 1
+          }
+          nc_php_version="$(docker run --rm --network none --entrypoint php "$NC_TEST_IMAGE" -r 'echo PHP_VERSION;')"
+          if [[ ! "$nc_php_version" =~ ^8\.([2345])\.([0-9]+)$ ]]; then
+            echo "::error::Unsupported or non-stable PHP runtime: ${nc_php_version}" >&2
+            exit 1
+          fi
+          nc_php_branch="${BASH_REMATCH[1]}"
+          nc_php_patch="${BASH_REMATCH[2]}"
+          case "$nc_php_branch" in
+            2) nc_php_min_patch=35 ;;
+            3) nc_php_min_patch=36 ;;
+            4) nc_php_min_patch=27 ;;
+            5) nc_php_min_patch=12 ;;
+          esac
+          if (( 10#$nc_php_patch < nc_php_min_patch )); then
+            echo "::error::PHP ${nc_php_version} lacks the required CVE-2026-109618/CVE-2026-109619 fixes. Need PHP 8.${nc_php_branch}.${nc_php_min_patch} or later in that branch." >&2
+            exit 1
+          fi
+          echo "Verified linux/amd64 / PHP ${nc_php_version}: October 21 security fixes included."
+          printf 'php_version=%s\n' "$nc_php_version" >> "$GITHUB_OUTPUT"
 
       - name: Check the actual server version and PHP extensions
         env:
@@ -185,6 +237,7 @@ jobs:
           NC_IMAGE: ${{ steps.prepare.outputs.image }}
           NC_VERSION: ${{ steps.prepare.outputs.version }}
           NC_BASE_IMAGE: ${{ steps.prepare.outputs.base_image }}
+          NC_PHP_VERSION: ${{ steps.runtime.outputs.php_version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -214,8 +267,9 @@ jobs:
             echo '```'
             echo
             printf 'Upstream base: `%s`\n' "$NC_BASE_IMAGE"
+            printf 'Verified PHP runtime: `%s`\n' "$NC_PHP_VERSION"
             echo
-            echo 'Checks passed: server version, required PHP extensions, PHP-FPM configuration, and helper script syntax.'
+            echo 'Checks passed: amd64 architecture, patched PHP runtime, server version, required PHP extensions, PHP-FPM configuration, and helper script syntax.'
             echo
             echo 'For the first publication, set the GHCR package visibility to Public so TrueNAS can pull it without registry credentials.'
             echo 'Create a fresh backup before applying this image through the catalog update.'
@@ -238,7 +292,7 @@ jobs:
             echo
             echo '## Ready-to-apply catalog update'
             echo
-            echo 'Download the artifact named nextcloud-35.0.2-catalog-31.0.24 from this run.'
+            echo 'Download the artifact named nextcloud-35.0.2-catalog-31.0.26 from this run.'
             echo 'It contains the complete new chart, catalog.json, app_versions.json, and a PowerShell application helper.'
             echo 'The helper checks source and payload hashes before copying files to your local catalog repo.'
             printf 'Catalog baseline: `%s`\n' "$nc_catalog_commit"
@@ -249,7 +303,7 @@ jobs:
         if: inputs.nextcloud_version == '35.0.2'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nextcloud-35.0.2-catalog-31.0.24
+          name: nextcloud-35.0.2-catalog-31.0.26
           path: catalog-update/
           include-hidden-files: true
           if-no-files-found: error
