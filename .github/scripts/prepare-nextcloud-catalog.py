@@ -16,10 +16,10 @@ import shutil
 import sys
 
 
-SOURCE_VERSION = "31.0.25"
-TARGET_VERSION = "31.0.26"
+SOURCE_VERSION = "31.0.26"
+TARGET_VERSION = "31.0.27"
 SOURCE_SERVER = "35.0.2"
-TARGET_SERVER = "35.0.2"
+TARGET_SERVER = "35.0.3"
 IMAGE_REPOSITORY = "ghcr.io/kqmaverick/nextcloud-fpm"
 
 
@@ -99,9 +99,9 @@ Write-Host 'No commit, push, or TrueNAS deployment was performed.'
 
 def prepare(source, output, image, source_commit):
     if not re.fullmatch(
-        re.escape(IMAGE_REPOSITORY) + r":35\.0\.2@sha256:[a-f0-9]{64}", image
+        re.escape(IMAGE_REPOSITORY) + ":" + re.escape(TARGET_SERVER) + r"@sha256:[a-f0-9]{64}", image
     ):
-        raise ValueError("Image must be the published ghcr.io/kqmaverick/nextcloud-fpm:35.0.2@sha256:<64 hex digits>")
+        raise ValueError(f"Image must be the published {IMAGE_REPOSITORY}:{TARGET_SERVER}@sha256:<64 hex digits>")
     if not re.fullmatch(r"[a-f0-9]{40}", source_commit):
         raise ValueError("A full 40-character catalog source commit is required")
     source = source.resolve()
@@ -131,13 +131,13 @@ def prepare(source, output, image, source_commit):
         raise ValueError("Source chart metadata has an unexpected Nextcloud version")
 
     chart_text = (source_chart / "Chart.yaml").read_text(encoding="utf-8")
-    chart_text = replace_once(chart_text, r"^appVersion: 35\.0\.2$", "appVersion: 35.0.2", "appVersion")
-    chart_text = replace_once(chart_text, r"^version: 31\.0\.25$", "version: 31.0.26", "chart version")
+    chart_text = replace_once(chart_text, rf"^appVersion: {re.escape(SOURCE_SERVER)}$", f"appVersion: {TARGET_SERVER}", "appVersion")
+    chart_text = replace_once(chart_text, rf"^version: {re.escape(SOURCE_VERSION)}$", f"version: {TARGET_VERSION}", "chart version")
     values_text = (source_chart / "ix_values.yaml").read_text(encoding="utf-8")
     image_tag = image.split(IMAGE_REPOSITORY + ":", 1)[1]
     values_text = replace_once(
         values_text,
-        r"\Aimage:\n  repository: ghcr\.io/kqmaverick/nextcloud-fpm\n  pullPolicy: IfNotPresent\n  tag: 35\.0\.2@sha256:[a-f0-9]{64}",
+        rf"\Aimage:\n  repository: {re.escape(IMAGE_REPOSITORY)}\n  pullPolicy: IfNotPresent\n  tag: {re.escape(SOURCE_SERVER)}@sha256:[a-f0-9]{{64}}",
         f"image:\n  repository: {IMAGE_REPOSITORY}\n  pullPolicy: IfNotPresent\n  tag: {image_tag}",
         "Nextcloud image block",
     )
