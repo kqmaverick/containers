@@ -1,6 +1,6 @@
 # Builds the ContainerForge-compatible image from an official linux/amd64 base.
 # Rejects PHP runtimes missing the October 21, 2026 security fixes before publish.
-# Nextcloud 35.0.2 also generates catalog 31.0.26 from the current 31.0.25 chart.
+# Nextcloud 35.0.3 also generates catalog 31.0.27 from the current 31.0.26 chart.
 # Does not push to the catalog repository or contact TrueNAS.
 
 name: Build Nextcloud FPM
@@ -12,12 +12,13 @@ on:
         description: Nextcloud server version to build
         type: choice
         required: true
-        default: '35.0.2'
+        default: '35.0.3'
         options:
           - '32.0.15'
           - '33.0.9'
           - '34.0.4'
           - '35.0.2'
+          - '35.0.3'
 
 permissions:
   contents: read
@@ -35,7 +36,7 @@ jobs:
       packages: write
     steps:
       - name: Check out the catalog-file generator
-        if: inputs.nextcloud_version == '35.0.2'
+        if: inputs.nextcloud_version == '35.0.3'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: workflow-source
@@ -44,7 +45,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out the current catalog baseline
-        if: inputs.nextcloud_version == '35.0.2'
+        if: inputs.nextcloud_version == '35.0.3'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: kqmaverick/catalog
@@ -52,8 +53,8 @@ jobs:
           path: catalog-source
           sparse-checkout: |
             /catalog.json
-            /premium/nextcloud/31.0.25/
             /premium/nextcloud/31.0.26/
+            /premium/nextcloud/31.0.27/
             /premium/nextcloud/app_versions.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -77,28 +78,44 @@ jobs:
         run: |
           set -euo pipefail
           case "$NC_REQUESTED_VERSION" in
-            32.0.15|33.0.9|34.0.4|35.0.2) ;;
+            32.0.15|33.0.9|34.0.4|35.0.2|35.0.3) ;;
             *) echo 'Unsupported Nextcloud version' >&2; exit 1 ;;
           esac
           nc_owner="${GITHUB_REPOSITORY_OWNER,,}"
           nc_image="ghcr.io/${nc_owner}/nextcloud-fpm"
-          nc_base="docker.io/library/nextcloud:${NC_REQUESTED_VERSION}-fpm"
-          if ! nc_index="$(docker buildx imagetools inspect --raw "$nc_base")"; then
-            echo "::error::Could not resolve ${nc_base}. The exact official FPM image must be available before this build can continue."
-            exit 1
-          fi
-          nc_digest="$(python3 -c '
+          nc_digest=''
+          # Docker Official Images publish each architecture separately. Its
+          # amd64 namespace can be ready before the combined library tag.
+          for nc_repository in docker.io/library/nextcloud docker.io/amd64/nextcloud; do
+            nc_candidate="${nc_repository}:${NC_REQUESTED_VERSION}-fpm"
+            if ! nc_index="$(docker buildx imagetools inspect --raw "$nc_candidate")"; then
+              echo "Could not resolve ${nc_candidate}; checking the next official source." >&2
+              continue
+            fi
+            nc_candidate_digest="$(python3 -c '
           import json, sys
           index = json.load(sys.stdin)
           matches = [item["digest"] for item in index.get("manifests", [])
                      if item.get("platform", {}).get("os") == "linux"
                      and item.get("platform", {}).get("architecture") == "amd64"]
-          if len(matches) != 1:
+          if len(matches) > 1:
               sys.exit("Expected exactly one official linux/amd64 image")
-          print(matches[0])
+          print(matches[0] if matches else "")
           ' <<< "$nc_index")"
-          [[ "$nc_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
-            echo 'Could not resolve the official amd64 base digest' >&2
+            if [[ -z "$nc_candidate_digest" ]]; then
+              echo "No linux/amd64 image in ${nc_candidate} yet; checking the next official source."
+              continue
+            fi
+            [[ "$nc_candidate_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+              echo 'Could not resolve the official amd64 base digest' >&2
+              exit 1
+            }
+            nc_base="$nc_candidate"
+            nc_digest="$nc_candidate_digest"
+            break
+          done
+          [[ -n "$nc_digest" ]] || {
+            echo '::error::The official FPM tag has no available linux/amd64 image yet; retry after upstream publishes it.' >&2
             exit 1
           }
           {
@@ -275,8 +292,8 @@ jobs:
             echo 'Create a fresh backup before applying this image through the catalog update.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Generate the complete 35.0.2 catalog update
-        if: inputs.nextcloud_version == '35.0.2'
+      - name: Generate the complete 35.0.3 catalog update
+        if: inputs.nextcloud_version == '35.0.3'
         env:
           NC_PUBLISHED_IMAGE: ${{ steps.publish.outputs.pinned_image }}
         shell: bash
@@ -292,7 +309,7 @@ jobs:
             echo
             echo '## Ready-to-apply catalog update'
             echo
-            echo 'Download the artifact named nextcloud-35.0.2-catalog-31.0.26 from this run.'
+            echo 'Download the artifact named nextcloud-35.0.3-catalog-31.0.27 from this run.'
             echo 'It contains the complete new chart, catalog.json, app_versions.json, and a PowerShell application helper.'
             echo 'The helper checks source and payload hashes before copying files to your local catalog repo.'
             printf 'Catalog baseline: `%s`\n' "$nc_catalog_commit"
@@ -300,10 +317,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the generated catalog files
-        if: inputs.nextcloud_version == '35.0.2'
+        if: inputs.nextcloud_version == '35.0.3'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nextcloud-35.0.2-catalog-31.0.26
+          name: nextcloud-35.0.3-catalog-31.0.27
           path: catalog-update/
           include-hidden-files: true
           if-no-files-found: error
