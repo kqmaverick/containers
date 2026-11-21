@@ -1,6 +1,6 @@
 # Builds the ContainerForge-compatible image from an official linux/amd64 base.
-# Rejects PHP runtimes missing the October 21, 2026 security fixes before publish.
-# Nextcloud 35.0.3 also generates catalog 31.0.27 from the current 31.0.26 chart.
+# Rejects PHP runtimes missing the November 19, 2026 security fixes before publish.
+# Nextcloud 35.0.3 also generates catalog 31.0.30 from the current 31.0.29 chart.
 # Does not push to the catalog repository or contact TrueNAS.
 
 name: Build Nextcloud FPM
@@ -53,8 +53,8 @@ jobs:
           path: catalog-source
           sparse-checkout: |
             /catalog.json
-            /premium/nextcloud/31.0.26/
-            /premium/nextcloud/31.0.27/
+            /premium/nextcloud/31.0.29/
+            /premium/nextcloud/31.0.30/
             /premium/nextcloud/app_versions.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -182,16 +182,16 @@ jobs:
           nc_php_branch="${BASH_REMATCH[1]}"
           nc_php_patch="${BASH_REMATCH[2]}"
           case "$nc_php_branch" in
-            2) nc_php_min_patch=35 ;;
-            3) nc_php_min_patch=36 ;;
-            4) nc_php_min_patch=27 ;;
-            5) nc_php_min_patch=12 ;;
+            2) nc_php_min_patch=36 ;;
+            3) nc_php_min_patch=37 ;;
+            4) nc_php_min_patch=28 ;;
+            5) nc_php_min_patch=13 ;;
           esac
           if (( 10#$nc_php_patch < nc_php_min_patch )); then
-            echo "::error::PHP ${nc_php_version} lacks the required CVE-2026-109618/CVE-2026-109619 fixes. Need PHP 8.${nc_php_branch}.${nc_php_min_patch} or later in that branch." >&2
+            echo "::error::PHP ${nc_php_version} lacks the required November 19, 2026 security fixes. Need PHP 8.${nc_php_branch}.${nc_php_min_patch} or later in that branch." >&2
             exit 1
           fi
-          echo "Verified linux/amd64 / PHP ${nc_php_version}: October 21 security fixes included."
+          echo "Verified linux/amd64 / PHP ${nc_php_version}: November 19 security fixes included."
           printf 'php_version=%s\n' "$nc_php_version" >> "$GITHUB_OUTPUT"
 
       - name: Check the actual server version and PHP extensions
@@ -309,7 +309,7 @@ jobs:
             echo
             echo '## Ready-to-apply catalog update'
             echo
-            echo 'Download the artifact named nextcloud-35.0.3-catalog-31.0.27 from this run.'
+            echo 'Download the artifact named nextcloud-35.0.3-catalog-31.0.30 from this run.'
             echo 'It contains the complete new chart, catalog.json, app_versions.json, and a PowerShell application helper.'
             echo 'The helper checks source and payload hashes before copying files to your local catalog repo.'
             printf 'Catalog baseline: `%s`\n' "$nc_catalog_commit"
@@ -320,7 +320,7 @@ jobs:
         if: inputs.nextcloud_version == '35.0.3'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nextcloud-35.0.3-catalog-31.0.27
+          name: nextcloud-35.0.3-catalog-31.0.30
           path: catalog-update/
           include-hidden-files: true
           if-no-files-found: error

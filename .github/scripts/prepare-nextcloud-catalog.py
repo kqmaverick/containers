@@ -16,9 +16,9 @@ import shutil
 import sys
 
 
-SOURCE_VERSION = "31.0.26"
-TARGET_VERSION = "31.0.27"
-SOURCE_SERVER = "35.0.2"
+SOURCE_VERSION = "31.0.29"
+TARGET_VERSION = "31.0.30"
+SOURCE_SERVER = "35.0.3"
 TARGET_SERVER = "35.0.3"
 IMAGE_REPOSITORY = "ghcr.io/kqmaverick/nextcloud-fpm"
 
